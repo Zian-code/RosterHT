@@ -1,0 +1,346 @@
+function pullCalendarWithNurseRoster() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var leaveSheet = ss.getSheetByName("FT Leave");
+  var rosterSheet = ss.getSheetByName("FT Roster");
+  var calendarId = "c_1a690da96eff45b4a64bde0431ea4ba4d2f7a76d9a8b84b6a71434278cdf104b@group.calendar.google.com";
+  var calendar = CalendarApp.getCalendarById(calendarId);
+
+  // Nurse name alias/nickname mapping (add more as needed)
+  var nurseAliasMap = {
+    "siti fatimah az-zahra binte yusoff": ["zahra"],
+    "siti hajar binte khalid shukur": ["hajar"],
+    "siti shu'aidah binte samadi": ["siti"],
+    "(aqi) nur aqilah binte ridzwan": ["aqi"],
+    "nur aqilah binti zulkeffli": ["aqilah", "aqilah z"],
+    "goh shi en": ["shien", "shi en", "goh shi en"],
+    "joscelin yip zu lin": ["joscelin", "yip zu lin"],
+    "thanapaackialetchumy veloo": ["thana"],
+    "nur amirah": ["amirah"],
+    "tan keen hong": ["keen hong", "keenhong"],
+    "glad kwan kar ean": ["glad"],
+    "kogilavani nathan": ["kogi"],
+    "gian yong yee": ["yong yee", "gian", "yongyee"]
+     
+  };
+
+  // Ignore events with these keywords in title (case-insensitive)
+  var skipEventKeywords = [
+    "back brief", "testing", "review", "general", "timing not confirmed"
+  ];
+  function isRealName(str) {
+  if (!str) return false;
+  var lower = str.trim().toLowerCase();
+  return lower !== "name";
+  }
+  // Parse Roster column B into General Nurse and Nurse Lead lists, skipping header "name"
+  var rosterData = rosterSheet.getRange(1, 2, rosterSheet.getLastRow()).getValues().flat();
+
+  function getNurseListBetweenMarkers(marker) {
+    var names = [];
+    var foundMarker = false;
+    var foundNameHeader = false;
+    for (var i = 0; i < rosterData.length; i++) {
+      var cell = (rosterData[i] || "").toString().trim();
+      if (!foundMarker) {
+        if (cell.toLowerCase() === marker.toLowerCase()) {
+          foundMarker = true;
+        }
+        continue;
+      }
+      if (!foundNameHeader) {
+        if (cell.toLowerCase() === "name") {
+          foundNameHeader = true;
+        }
+        continue;
+      }
+      if (!cell) break; // stop on first blank after header
+      names.push(cell);
+    }
+    return names;
+  }
+
+  var generalNurseList = getNurseListBetweenMarkers("General Nurse");
+  var nurseLeadList = getNurseListBetweenMarkers("Nurse Lead");
+
+
+  // Matching function with aliases and skip logic
+  function matchesNurse(rosterName, eventTitle) {
+    if (!rosterName || !eventTitle) return false;
+    var rosterLower = rosterName.trim().toLowerCase();
+    var titleLower = eventTitle.trim().toLowerCase();
+
+    // Skip event if contains any skip keywords
+    for (var i = 0; i < skipEventKeywords.length; i++) {
+      if (titleLower.indexOf(skipEventKeywords[i]) !== -1) return false;
+    }
+
+    // If roster name is in alias map, ONLY check aliases (no fuzzy for these names)
+    if (nurseAliasMap[rosterLower]) {
+      var aliases = nurseAliasMap[rosterLower];
+      for (var i = 0; i < aliases.length; i++) {
+        var aliasLower = aliases[i].toLowerCase();
+        // Strict word boundary match (will only match whole words, case-insensitive)
+        var regex = new RegExp("\\b" + aliasLower + "\\b", "i");
+        if (regex.test(eventTitle)) return true;
+      }
+      return false;
+    }
+
+    // Fallback to robust fuzzy match for names NOT in alias map
+    return fuzzyMatchName(rosterName, eventTitle);
+  }
+
+
+
+
+  // Robust fuzzy match including initials, substrings, etc.
+  function fuzzyMatchName(rosterName, eventTitle) {
+    // If this nurse has a custom alias, do NOT fuzzy match
+    if (typeof nurseAliasMap !== 'undefined' && nurseAliasMap[rosterName.trim().toLowerCase()]) return false;
+
+    if (!rosterName || !eventTitle) return false;
+
+    var rosterNoSpace = rosterName.replace(/\s+/g, '').toLowerCase();
+    var titleNoSpace = eventTitle.replace(/\s+/g, '').toLowerCase();
+
+    // Only match if 6+ characters (can adjust)
+    if (rosterNoSpace.length >= 6 && titleNoSpace.indexOf(rosterNoSpace) !== -1) {
+      return true;
+    }
+    if (titleNoSpace.length >= 6 && rosterNoSpace.indexOf(titleNoSpace) !== -1) {
+      return true;
+    }
+
+    // Initials check (2+ initials only)
+    var rosterParts = rosterName.trim().split(/\s+/);
+    var initials = rosterParts.map(function(p) { return p.charAt(0).toUpperCase(); }).join('');
+    var spacedInitials = rosterParts.map(function(p) { return p.charAt(0).toUpperCase(); }).join(' ');
+    var eventTitleUpper = eventTitle.toUpperCase();
+    if (initials.length >= 2 && (eventTitleUpper.indexOf(initials) !== -1 || eventTitleUpper.indexOf(spacedInitials) !== -1)) {
+      return true;
+    }
+
+    // Each word, require 5+ char substring (stricter)
+    var eventWords = eventTitle.trim().toLowerCase().split(/\s+/);
+    for (var i = 0; i < rosterParts.length; i++) {
+      var nameWord = rosterParts[i].toLowerCase();
+      for (var j = 0; j < eventWords.length; j++) {
+        var eventWord = eventWords[j];
+        // Direct match (only if word is 5+ chars)
+        if (eventWord.length >= 5 && eventWord === nameWord) return true;
+        // Front substring (5+ chars)
+        if (eventWord.length >= 5 && eventWord.startsWith(nameWord) && nameWord.length >= 5) return true;
+        if (nameWord.length >= 5 && nameWord.startsWith(eventWord) && eventWord.length >= 5) return true;
+        // Back substring (5+ chars)
+        if (eventWord.length >= 5 && eventWord.endsWith(nameWord) && nameWord.length >= 5) return true;
+        if (nameWord.length >= 5 && nameWord.endsWith(eventWord) && eventWord.length >= 5) return true;
+        // Any position substring (5+ chars)
+        if (nameWord.length >= 5 && eventWord.indexOf(nameWord) !== -1) return true;
+        if (eventWord.length >= 5 && nameWord.indexOf(eventWord) !== -1) return true;
+      }
+    }
+    // Also, if full name is in title and is at least 6 chars
+    if (rosterName.trim().length >= 6 && eventTitle.toLowerCase().indexOf(rosterName.trim().toLowerCase()) !== -1) {
+      return true;
+    }
+    return false;
+  }
+
+
+  // Leave type pattern logic
+  var leaveTypes = ["MC", "OIL", "Leave", "On leave", "PH", "Training", "NPL", "off in lieu"];
+
+  // Get start and end date range from Roster!D3 and E3
+  var start = new Date(rosterSheet.getRange("D3").getValue());
+  var end = new Date(rosterSheet.getRange("E3").getValue());
+  end.setDate(end.getDate() + 1); // Include end date for all-day events
+  var events = calendar.getEvents(start, end);
+
+  var rows = [];
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    var evTitle = (ev.getTitle() || "").trim();
+    // Skip unwanted event titles
+    if (evTitle.trim() === "") continue;
+    var matchedName = "";
+    for (var j = 0; j < generalNurseList.length; j++) {
+      if (matchesNurse(generalNurseList[j], evTitle)) {
+        matchedName = generalNurseList[j];
+        break;
+      }
+    }
+    if (!matchedName) {
+      for (var k = 0; k < nurseLeadList.length; k++) {
+        if (matchesNurse(nurseLeadList[k], evTitle)) {
+          matchedName = nurseLeadList[k];
+          break;
+        }
+      }
+    }
+    //if (!matchedName) continue; // Only process if matched to nurse
+
+    var evStart = ev.isAllDayEvent() ? ev.getAllDayStartDate() : ev.getStartTime();
+    var evEndRaw = ev.isAllDayEvent() ? ev.getAllDayEndDate() : ev.getEndTime();
+    var evEnd = ev.isAllDayEvent() ? new Date(evEndRaw.getTime() - 24*3600*1000) : evEndRaw;
+
+    // LEAVE TYPE LOGIC
+    var foundLeaveType = "";
+    var onMatch = evTitle.match(/\bon\b\s*(.+)$/i);
+    if (onMatch) {
+      foundLeaveType = onMatch[1].trim();
+    }
+    if (!foundLeaveType) {
+      for (var t = 0; t < leaveTypes.length; t++) {
+        var re = new RegExp("\\b" + leaveTypes[t] + "\\b", "i");
+        if (re.test(evTitle)) {
+          foundLeaveType = leaveTypes[t];
+          break;
+        }
+      }
+    }
+    rows.push([
+      matchedName,
+      foundLeaveType,
+      formatDateForSheet(evStart),
+      formatDateForSheet(evEnd),
+      evTitle
+    ]);
+  }
+
+  // Clear only data rows (leave header & its formatting untouched)
+  if (leaveSheet.getLastRow() > 1) {
+    leaveSheet.getRange(2, 1, leaveSheet.getLastRow() - 1, leaveSheet.getLastColumn()).clearContent();
+  }
+  // Write new data (if any) from row 2
+  if (rows.length > 0) {
+    leaveSheet.getRange(2, 1, rows.length, 5).setValues(rows);
+  }
+
+  // Build leaveMap and leaveTitleMap from rows
+  var leaveMap = {};        // Key: name|date, Value: leave type
+  var leaveTitleMap = {};   // Key: name|date, Value: calendar event title
+  for (var i = 0; i < rows.length; i++) {
+    var leaveName = rows[i][0];
+    var leaveType = rows[i][1];
+    var startDate = rows[i][2];
+    var endDate = rows[i][3];
+    var leaveTitle = rows[i][4];
+    if (!leaveName || !leaveType || !startDate) continue;
+    var curDate = new Date(startDate);
+    var lastDate = new Date(endDate);
+    while (curDate <= lastDate) {
+      var curDateStr = formatDateForSheet(curDate);
+      leaveMap[leaveName + "|" + curDateStr] = leaveType;
+      leaveTitleMap[leaveName + "|" + curDateStr] = leaveTitle;
+      curDate.setDate(curDate.getDate() + 1);
+    }
+  }
+
+  // --- FT Availability Attendance/Remarks update ---
+  var noKeywords = ["training", "online", "workshop", "briefing", "course", "seminar"];
+  var mcKeywords = ["mc", "medical certificate", "medical cert"];
+  var hlKeywords = ["hl", "hospitalisation leave", "hospitalization leave"];
+  var leaveKeywords = [
+    "annual leave", "childcare", "ph", "public holiday", "off in lieu", "oil", "off in lieu", "annual", "leave", "parent care", "unpaid", "urgent", "replacement", "study", "vacation"
+  ];
+  var availSheet = ss.getSheetByName("FT Availability");
+  if (!availSheet) return;
+  var availLastRow = availSheet.getLastRow();
+  if (availLastRow < 2) return;
+  var availDates = availSheet.getRange(2, 2, availLastRow - 1, 1).getValues().flat(); // Column B = Date
+  var availNames = availSheet.getRange(2, 9, availLastRow - 1, 1).getValues().flat(); // Column I = Name
+  var availJ = availSheet.getRange(2, 10, availLastRow - 1, 1).getValues(); // Column J
+  var availM = availSheet.getRange(2, 13, availLastRow - 1, 1).getValues(); // Column M (remarks)
+
+  for (var i = 0; i < availDates.length; i++) {
+    var aDate = formatDateForSheet(new Date(availDates[i]));
+    var aName = (availNames[i] || "").toString().trim();
+    var key = aName + "|" + aDate;
+    var currentJ = (availJ[i][0] || "").toString().trim();
+    var currentM = (availM[i][0] || "").toString();
+
+    var eventTitle = "";
+    var attendance = "";
+    var remarks = currentM;
+    if (["no", "yes"].includes(currentJ.toLowerCase())) {
+      continue;
+    }
+    if (leaveMap[key]) {
+      eventTitle = leaveTitleMap[key] || "";
+      var titleLower = eventTitle.toLowerCase();
+      var found = false;
+      // 1. NO types (training etc)
+      //for (var n = 0; n < noKeywords.length; n++) {
+      //  if (titleLower.indexOf(noKeywords[n]) !== -1) {
+      //    attendance = "No";
+      //    found = true;
+      //    break;
+      //  }
+      //}
+      // 2. MC
+      if (!found) {
+        for (var m = 0; m < mcKeywords.length; m++) {
+          if (titleLower.indexOf(mcKeywords[m]) !== -1) {
+            attendance = "MC";
+            found = true;
+            break;
+          }
+        }
+      }
+      // 3. HL
+      if (!found) {
+        for (var h = 0; h < hlKeywords.length; h++) {
+          if (titleLower.indexOf(hlKeywords[h]) !== -1) {
+            attendance = "HL";
+            found = true;
+            break;
+          }
+        }
+      }
+      // 4. Leave (if not MC/HL/No)
+      if (!found) {
+        for (var l = 0; l < leaveKeywords.length; l++) {
+          if (titleLower.indexOf(leaveKeywords[l]) !== -1) {
+            attendance = "Leave";
+            found = true;
+            break;
+          }
+        }
+      }
+      // Default to Leave if we matched nothing but there IS a calendar event
+      if (!found) attendance = "Leave";
+
+      // Set attendance in column J
+      availJ[i][0] = attendance;
+
+      // Always add the calendar remark for any name match/event
+      var newRemark = "Calendar: " + eventTitle;
+      remarks = remarks.replace(/\(Calendar:[^)]+\)/g, '').trim(); // Remove old
+      remarks = remarks ? remarks + " (" + newRemark + ")" : "(" + newRemark + ")";
+      availM[i][0] = remarks.trim();
+    } else {
+      // If there was previously a calendar entry, remove the remarks for it (but keep SOS/IC/GN)
+      var currentAttendance = (availJ[i][0] || "").toString().trim();
+      if (currentAttendance !== "MC") { // Do not overwrite MC (per previous rules)
+        availJ[i][0] = "";
+        // Remove only "(Calendar: ...)" part, not SOS/IC/GN or other user remarks
+        if (!/sos|ic|gn/i.test(currentM)) {
+          availM[i][0] = currentM.replace(/\(Calendar:[^)]+\)/g, '').trim();
+        }
+      }
+      // If MC in J, leave untouched
+    }
+  }
+
+  // Write back to columns J and M only
+  availSheet.getRange(2, 10, availJ.length, 1).setValues(availJ);
+  availSheet.getRange(2, 13, availM.length, 1).setValues(availM);
+}
+
+function formatDateForSheet(dateObj) {
+  if (!dateObj) return "";
+  var yyyy = dateObj.getFullYear();
+  var mm = ("0"+(dateObj.getMonth()+1)).slice(-2);
+  var dd = ("0"+dateObj.getDate()).slice(-2);
+  return yyyy + "-" + mm + "-" + dd;
+}
