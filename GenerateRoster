@@ -1,0 +1,395 @@
+// ---- Constants for easy edit ----
+const SHIFT1_START = 700;   // 7am
+const SHIFT1_END = 1700;    // 5pm (exclusive)
+const SHIFT2_START = 1700;  // 5pm
+const SHIFT2_END = 0;       // Midnight
+
+function getShiftType(startTime, endTime) {
+  var start = parseInt(startTime, 10);
+  var end = parseInt(endTime, 10);
+  if ((start >= SHIFT1_START && start < SHIFT1_END) || (end > SHIFT1_START && end <= SHIFT1_END)) {
+    return "Shift 1";
+  }
+  if ((start >= SHIFT2_START && start <= 2359) || (end > SHIFT2_START && end <= 2359) || end === SHIFT2_END) {
+    return "Shift 2";
+  }
+  return "";
+}
+function formatCustomDate(date) {
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return date.getDate() + " " + months[date.getMonth()] + " " + date.getFullYear();
+}
+function toSheetTime(str) {
+  return "'" + str.toString().padStart(4, '0');
+}
+function parseShiftTime(str) {
+  var m = (str||"").match(/(\d{3,4})\s*to\s*(\d{3,4})/);
+  if (!m) return {start: '', end: ''};
+  return {start: m[1].padStart(4,'0'), end: m[2].padStart(4,'0')};
+}
+function normaliseShiftTiming(str) {
+  var m = (str||"").match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?\s*[\-to]{1,3}\s*(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/i);
+  if (!m) return str;
+  var sHour = parseInt(m[1]);
+  var sMin = m[2] ? parseInt(m[2]) : 0;
+  var sAMPM = (m[3]||"").toLowerCase();
+  var eHour = parseInt(m[4]);
+  var eMin = m[5] ? parseInt(m[5]) : 0;
+  var eAMPM = (m[6]||"").toLowerCase();
+  if (sAMPM==="pm" && sHour < 12) sHour += 12;
+  if (sAMPM==="am" && sHour==12) sHour = 0;
+  if (eAMPM==="pm" && eHour < 12) eHour += 12;
+  if (eAMPM==="am" && eHour==12) eHour = 0;
+  var start = (sHour*100+sMin).toString().padStart(4,'0');
+  var end   = (eHour*100+eMin).toString().padStart(4,'0');
+  return start + " to " + end;
+}
+function findRowByColB(sheet, keyword) {
+  var values = sheet.getRange("B1:B" + sheet.getLastRow()).getValues().flat();
+  for (var i = 0; i < values.length; i++) {
+    if ((values[i] || "").toString().trim().toLowerCase() === keyword.toLowerCase()) return i + 1;
+  }
+  return -1;
+}
+function getListBelow(sheet, col, startRow) {
+  var out = [];
+  var row = startRow;
+  while (true) {
+    var v = (sheet.getRange(row, col).getValue() || "").toString().trim();
+    if (!v) break;
+    out.push(v);
+    row++;
+  }
+  return out;
+}
+function getShiftMap(sheet, startRow) {
+  var out = {};
+  var row = startRow;
+  while (true) {
+    var code = (sheet.getRange(row, 2).getValue() || "").toString().trim().toUpperCase();
+    var time = (sheet.getRange(row, 3).getValue() || "").toString().trim();
+    if (!code || !time || code.match(/total/i)) break;
+    if (code === "FD" || code === "ND" || code === "AM/ND") {
+      out[code] = { code: code, timing: time };
+    }
+    row++;
+  }
+  return out;
+}
+function getNLShiftMap(sheet, startRow) {
+  var out = {};
+  var row = startRow;
+  while (true) {
+    var codeRaw = (sheet.getRange(row, 2).getValue() || "").toString().trim();
+    var code = codeRaw.toUpperCase();
+    var time = (sheet.getRange(row, 3).getValue() || "").toString().trim();
+    if (!code || !time) break;
+    var timeStr = normaliseShiftTiming(time.replace(/-/, " to "));
+    var shiftName = code.replace(/SHIFT (\d+)/i, "Shift $1");
+    var timeObj = parseShiftTime(timeStr);
+    out[code] = {
+      code: code,
+      timing: timeStr,
+      shift: shiftName,
+      start: timeObj.start,
+      end: timeObj.end,
+      num: parseInt(timeObj.start||"0",10)
+    };
+    row++;
+  }
+  return out;
+}
+function getLeaveMapFromSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var leaveSheet = ss.getSheetByName("FT Leave");
+  var leaveData = leaveSheet ? leaveSheet.getDataRange().getValues() : [];
+  var leaveMap = {};
+  for (var i = 1; i < leaveData.length; i++) {
+    var emp = (leaveData[i][0] || "").toString().trim();
+    var leaveType = (leaveData[i][1] || "").toString().trim();
+    var startRaw = leaveData[i][2];
+    var endRaw = leaveData[i][3];
+    if (!emp || !leaveType || !startRaw) continue;
+    var empName = emp.toLowerCase();
+    var start = startRaw instanceof Date ? new Date(startRaw) : new Date(startRaw);
+    var end = endRaw ? (endRaw instanceof Date ? new Date(endRaw) : new Date(endRaw)) : start;
+    var status = "";
+    var leaveTypeLc = leaveType.toLowerCase();
+    if (leaveTypeLc.indexOf("annual") !== -1 || leaveTypeLc === "leave") status = "Leave";
+    else if (leaveTypeLc.indexOf("mc") !== -1) status = "MC";
+    else if (leaveTypeLc.indexOf("ml") !== -1) status = "ML";
+    else if (leaveTypeLc.indexOf("hl") !== -1) status = "HL";
+    if (!status) continue;
+    for (var d = new Date(start.getFullYear(), start.getMonth(), start.getDate()); d <= end; d.setDate(d.getDate() + 1)) {
+      var dateStr = formatCustomDate(d);
+      leaveMap[empName + "|" + dateStr] = status;
+    }
+  }
+  return leaveMap;
+}
+
+function populateResults() {
+  pullCalendarWithNurseRoster();
+
+  var ss = SpreadsheetApp.openById("1pGl9eQJ9xCV0sOJkzK2MKmIulHFnx70i_NKYEPUqO4Q");
+  var roster = ss.getSheetByName("FT Roster");
+  var results = ss.getSheetByName("FT Availability");
+
+  var leaveMap = getLeaveMapFromSheet();
+
+  var mode = (roster.getRange("C2").getValue() || "").toString().trim().toLowerCase();
+  var clearResults = (mode === "generate new");
+  var replaceResults = (mode === "replace existing");
+  var continueExisting = (mode === "continue from existing");
+
+  var startDate = new Date(roster.getRange("D2").getValue());
+  var endDate = new Date(roster.getRange("E2").getValue());
+
+  var maxCol = roster.getLastColumn();
+  var daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var daysOfWeekNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  var gnRow = findRowByColB(roster, "General Nurse");
+  var gnNameStartRow = gnRow + 2;
+  var gn_names = getListBelow(roster, 2, gnNameStartRow);
+  var gn_ojt = gn_names.map(function(_, idx) {
+    return (roster.getRange(gnNameStartRow + idx, 3).getValue() || "");
+  });
+
+  var gnShiftRow = findRowByColB(roster, "General Nurse Shifts");
+  var gn_shiftMap = getShiftMap(roster, gnShiftRow + 1);
+
+  // Only needed if you want Nurse Lead support, else comment these 3 lines:
+  // var nlRow = findRowByColB(roster, "Nurse Lead");
+  // var nlNameStartRow = nlRow + 2;
+  // var nl_names = getListBelow(roster, 2, nlNameStartRow);
+
+  var headerRow = gnRow + 1;
+  var headerVals = roster.getRange(headerRow, 1, 1, maxCol).getValues()[0];
+  var dateColIndexes = [];
+  var startCol = 4; // D
+  while (startCol <= maxCol) {
+    var thisBlock = [];
+    for (var c = startCol - 1; c < maxCol; c++) {
+      if (!headerVals[c]) break;
+      thisBlock.push(c + 1);
+    }
+    if (thisBlock.length === 0) break;
+    dateColIndexes.push(thisBlock);
+    startCol = thisBlock[thisBlock.length - 1] + 1;
+    while (startCol <= maxCol && !headerVals[startCol - 1]) startCol++;
+  }
+
+  var availabilityData = results.getDataRange().getValues();
+  var availDateIdx = 1;
+  var availNameIdx = 8;
+  var availKeyMap = {};
+  for (var r = 1; r < availabilityData.length; r++) {
+    var row = availabilityData[r];
+    var dateVal = row[availDateIdx];
+    var nameVal = (row[availNameIdx] || "").toString().trim().toLowerCase();
+    var dateStr = "";
+    if (dateVal instanceof Date) dateStr = formatCustomDate(dateVal);
+    else {
+      var dt = new Date(dateVal);
+      if (!isNaN(dt)) dateStr = formatCustomDate(dt);
+      else dateStr = (dateVal || "").toString().trim();
+    }
+    if (dateStr && nameVal) availKeyMap[dateStr + "|" + nameVal] = r;
+  }
+
+  var desiredMap = {};
+
+  if (clearResults) {
+    var lastRow = results.getLastRow();
+    if (lastRow > 1) {
+      results.getRange(2, 1, lastRow - 1, results.getLastColumn()).clearContent();
+    }
+  }
+
+  // --------- MAIN: PROCESS BY DATE FIRST ---------
+  for (var dt = new Date(startDate); dt <= endDate; dt.setDate(dt.getDate() + 1)) {
+    var thisDate = new Date(dt);
+    var thisDayIdx = thisDate.getDay();
+    var thisDayShort = daysOfWeek[thisDayIdx];
+
+    dateColIndexes.forEach(function(block) {
+      var blockDates = block.map(function(colIdx) {
+        return roster.getRange(headerRow, colIdx).getValue();
+      });
+      for (var j = 0; j < block.length; j++) {
+        var dVal = blockDates[j];
+        if (!dVal) continue;
+        var dCheck = new Date(dVal);
+        if (
+          dCheck.getFullYear() !== thisDate.getFullYear() ||
+          dCheck.getMonth() !== thisDate.getMonth() ||
+          dCheck.getDate() !== thisDate.getDate()
+        ) continue;
+        var shifts = roster.getRange(headerRow + 1, block[j], gn_names.length, 1).getValues();
+        for (var i = 0; i < gn_names.length; i++) {
+          var shiftCodeRaw = (shifts[i][0] || "").toString().trim().toUpperCase();
+          if (!shiftCodeRaw || shiftCodeRaw === "OFF") continue;
+          var staffName = gn_names[i];
+          var ojtVal = gn_ojt[i];
+          var key = formatCustomDate(thisDate) + "|" + staffName.toLowerCase();
+
+          if (shiftCodeRaw === "FD" && gn_shiftMap["FD"]) {
+            var map = gn_shiftMap["FD"];
+            var timeStr = normaliseShiftTiming(map.timing);
+            var timeObj = parseShiftTime(timeStr);
+            var shiftType = getShiftType(timeObj.start, timeObj.end) || "Shift 1";
+            var leave = leaveMap[staffName.toLowerCase() + "|" + formatCustomDate(thisDate)] || "";
+            var rowArr = [
+              "FT", formatCustomDate(thisDate), thisDayShort,
+              timeStr, shiftType, toSheetTime(timeObj.start), toSheetTime(timeObj.end), "",
+              staffName, leave, "Yes", ojtVal, "", parseInt(timeObj.start, 10)
+            ];
+            desiredMap[key] = rowArr;
+          } else if (shiftCodeRaw === "ND" && gn_shiftMap["ND"]) {
+            var map = gn_shiftMap["ND"];
+            var timeStr = normaliseShiftTiming(map.timing);
+            var timeObj = parseShiftTime(timeStr);
+            var shiftType = getShiftType(timeObj.start, timeObj.end) || "Shift 2";
+            var leave = leaveMap[staffName.toLowerCase() + "|" + formatCustomDate(thisDate)] || "";
+            var rowArr = [
+              "FT", formatCustomDate(thisDate), thisDayShort,
+              timeStr, shiftType, toSheetTime(timeObj.start), toSheetTime(timeObj.end), "",
+              staffName, leave, "Yes", ojtVal, "", parseInt(timeObj.start, 10)
+            ];
+            desiredMap[key] = rowArr;
+          } else if (shiftCodeRaw === "AM/ND" && gn_shiftMap["AM/ND"]) {
+            var map = gn_shiftMap["AM/ND"];
+            var parts = map.timing.split(',');
+            if (parts.length === 2) {
+              var amTimeStr = normaliseShiftTiming(parts[0].trim());
+              var amObj = parseShiftTime(amTimeStr);
+              var amShiftType = getShiftType(amObj.start, amObj.end) || "Shift 1";
+              var leave = leaveMap[staffName.toLowerCase() + "|" + formatCustomDate(thisDate)] || "";
+              var rowArr1 = [
+                "FT", formatCustomDate(thisDate), thisDayShort,
+                amTimeStr, amShiftType, toSheetTime(amObj.start), toSheetTime(amObj.end), "",
+                staffName, leave, "Yes", ojtVal, "", parseInt(amObj.start, 10)
+              ];
+              desiredMap[key + "|am"] = rowArr1;
+              var ndTimeStr = normaliseShiftTiming(parts[1].trim());
+              var ndObj = parseShiftTime(ndTimeStr);
+              var ndShiftType = getShiftType(ndObj.start, ndObj.end) || "Shift 2";
+              var rowArr2 = [
+                "FT", formatCustomDate(thisDate), thisDayShort,
+                ndTimeStr, ndShiftType, toSheetTime(ndObj.start), toSheetTime(ndObj.end), "",
+                staffName, leave, "Yes", ojtVal, "", parseInt(ndObj.start, 10)
+              ];
+              desiredMap[key + "|pm"] = rowArr2;
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // --- MODE HANDLING ---
+  if (replaceResults) {
+    var keepKeys = Object.keys(desiredMap);
+    var removeRows = [];
+    for (var r = 1; r < availabilityData.length; r++) {
+      var row = availabilityData[r];
+      var dateVal = row[availDateIdx];
+      var nameVal = (row[availNameIdx] || "").toString().trim().toLowerCase();
+      var dateStr = "";
+      if (dateVal instanceof Date) dateStr = formatCustomDate(dateVal);
+      else {
+        var dt = new Date(dateVal);
+        if (!isNaN(dt)) dateStr = formatCustomDate(dt);
+        else dateStr = (dateVal || "").toString().trim();
+      }
+      var baseKey = dateStr + "|" + nameVal;
+      var isKeep = keepKeys.some(function(desiredKey) {
+        if (desiredKey.startsWith(baseKey)) return true;
+        return false;
+      });
+      if (
+        dateStr &&
+        (new Date(dateStr).getTime() >= startDate.getTime() && new Date(dateStr).getTime() <= endDate.getTime())
+        && !isKeep
+      ) {
+        removeRows.push(r + 1);
+      }
+    }
+    removeRows.sort(function(a, b) { return b - a; });
+    for (var ri = 0; ri < removeRows.length; ri++) {
+      results.deleteRow(removeRows[ri]);
+    }
+    availabilityData = results.getDataRange().getValues();
+    availKeyMap = {};
+    for (var r = 1; r < availabilityData.length; r++) {
+      var row = availabilityData[r];
+      var dateVal = row[availDateIdx];
+      var nameVal = (row[availNameIdx] || "").toString().trim().toLowerCase();
+      var dateStr = "";
+      if (dateVal instanceof Date) dateStr = formatCustomDate(dateVal);
+      else {
+        var dt = new Date(dateVal);
+        if (!isNaN(dt)) dateStr = formatCustomDate(dt);
+        else dateStr = (dateVal || "").toString().trim();
+      }
+      if (dateStr && nameVal) availKeyMap[dateStr + "|" + nameVal] = r;
+    }
+    Object.keys(desiredMap).forEach(function(key) {
+      var rowArr = desiredMap[key];
+      var baseKey = key.split('|am').join('').split('|pm').join('');
+      var rowIdx = availKeyMap[baseKey];
+      if (!rowIdx) {
+        rowArr = rowArr.slice(); rowArr.pop();
+        results.appendRow(rowArr);
+      } else {
+        var rowData = availabilityData[rowIdx];
+        var changed = false;
+        for (var z = 0; z < rowArr.length - 1; z++) {
+          if ((rowData[z] || "") != (rowArr[z] || "")) { changed = true; break; }
+        }
+        if (changed) {
+          rowArr = rowArr.slice(); rowArr.pop();
+          results.getRange(rowIdx + 1, 1, 1, rowArr.length).setValues([rowArr]);
+        }
+      }
+    });
+    return;
+  }
+
+  if (clearResults) {
+    Object.keys(desiredMap).forEach(function(key) {
+      var rowArr = desiredMap[key];
+      rowArr = rowArr.slice(); rowArr.pop();
+      results.appendRow(rowArr);
+    });
+    return;
+  }
+
+  if (continueExisting) {
+    Object.keys(desiredMap).forEach(function(key) {
+      if (!availKeyMap[key]) {
+        var rowArr = desiredMap[key];
+        rowArr = rowArr.slice(); rowArr.pop();
+        results.appendRow(rowArr);
+      }
+    });
+    return;
+  }
+}
+
+// --- Confirmation Dialog (Button Calls This) ---
+function confirmAndPopulate() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert(
+    'Confirmation',
+    'Are you sure you want to generate FT Availability list?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response == ui.Button.YES) {
+    populateResults();
+    ui.alert('FT Availability generation completed!');
+  } else {
+    ui.alert('Operation cancelled.');
+  }
+}
