@@ -198,7 +198,7 @@ function populateResults() {
   if (!clearResults) {
     var data = results.getDataRange().getValues();
     for (var i = 1; i < data.length; i++) {
-      var row = data[i];  // <-- row is defined here, inside the loop!
+      var row = data[i];
       var rawDate = row[1];
       var date = "";
       if (rawDate instanceof Date) {
